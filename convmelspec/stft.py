@@ -8,14 +8,15 @@
 # OF ANY KIND, either express or implied. See the License for the specific language
 # governing permissions and limitations under the License.
 
+import math
 from typing import Callable, Optional, Union
 
-import math
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from scipy import signal as sig
+
 
 def _register_nan_forward_hook():
     def _nan_forward_hook(module, input, output):
@@ -27,6 +28,7 @@ def _register_nan_forward_hook():
             raise RuntimeError(f"-inf detected in {module.__class__.__name__}")
 
     return torch.nn.modules.module.register_module_forward_hook(_nan_forward_hook)
+
 
 class MelFilterbank(nn.Module):
     """Torch mel filterbank linear layer"""
@@ -155,8 +157,8 @@ class _STFT_Internal(nn.Module):
             assert n != None
             assert w != None
             DFTr, DFTi = self._create_DFT_matrix(n, w, window=window)
-            self.register_buffer("DFTr", DFTr)
-            self.register_buffer("DFTi", DFTi)
+            self.register_buffer("DFTr", DFTr[..., None])
+            self.register_buffer("DFTi", DFTi[..., None])
 
     def get_DFT(self):
         if self.dft_mode == "store":
@@ -190,9 +192,12 @@ class _STFT_Internal(nn.Module):
     ):
 
         # 1D Convolution separately for real and imaginary parts of DFT matrix
-        real_x = F.conv1d(x, self.DFTr, stride=hop_size, padding=self.padding)
-        imag_x = F.conv1d(x, self.DFTi, stride=hop_size, padding=self.padding)
-        return self.complex_to_abs(real_x, imag_x, power=power)
+        # real_x = F.conv1d(x, self.DFTr, stride=hop_size, padding=self.padding)
+        # imag_x = F.conv1d(x, self.DFTi, stride=hop_size, padding=self.padding)
+
+        real_x2d = F.conv2d(x, self.DFTr, stride=hop_size, padding=self.padding)[..., 0]
+        imag_x2d = F.conv2d(x, self.DFTi, stride=hop_size, padding=self.padding)[..., 0]
+        return self.complex_to_abs(real_x2d, imag_x2d, power=power)
 
     def forward_on_the_fly(
         self,
@@ -230,10 +235,7 @@ class _STFT_Internal(nn.Module):
             _type_: spectrogram
         """
         # Dynamically compute DFT matrix every time (saves model space, wastes CPU)
-        return self.forward_precomputed(
-            x, self.DFTr, self.DFTi, hop_size, power=power
-        )
-
+        return self.forward_precomputed(x, self.DFTr, self.DFTi, hop_size, power=power)
 
 
 class ConvertibleSpectrogram(nn.Module):
@@ -387,17 +389,13 @@ class ConvertibleSpectrogram(nn.Module):
         if type(window).__module__ == np.__name__:
 
             def window_fn(win_len):
-                return torch.from_numpy(window.astype(np.float32)).to(
-                    self.device
-                )
+                return torch.from_numpy(window.astype(np.float32)).to(self.device)
 
         elif window == "hann":
 
             def window_fn(win_len):
                 window = sig.windows.hann(win_len, sym=True)
-                return torch.from_numpy(window.astype(np.float32)).to(
-                    self.device
-                )
+                return torch.from_numpy(window.astype(np.float32)).to(self.device)
 
         else:
             raise RuntimeError(
@@ -406,7 +404,9 @@ class ConvertibleSpectrogram(nn.Module):
             )
         return window_fn
 
-    def set_mode(self, spec_mode: str, dft_mode: str="on_the_fly", coreml: bool = False):
+    def set_mode(
+        self, spec_mode: str, dft_mode: str = "on_the_fly", coreml: bool = False
+    ):
         """Set the DFT mode. See docs above.
 
         Args:
@@ -481,6 +481,7 @@ class ConvertibleSpectrogram(nn.Module):
 
         elif self.spec_mode == "torchaudio":
             import torchaudio  # lazy import
+
             self.stft = None
             self.window_ta = torch.hann_window(self.n_fft)
             self.window_scale = self.window_ta.sum()
@@ -495,9 +496,6 @@ class ConvertibleSpectrogram(nn.Module):
                 window_fn=normalized_window_fn,
                 pad=self.padding,
             )
-
-
-
 
     def forward(
         self,
@@ -522,7 +520,7 @@ class ConvertibleSpectrogram(nn.Module):
             _type_: tensor of (batch x mel x frames)
         """
 
-        x = x.unsqueeze(1)  # Add channel: (batch x channel x samples)
+        # x = x.unsqueeze(1)  # Add channel: (batch x channel x samples)
         power = not math.isclose(self.power, 1.0)
         if self.spec_mode == "torchaudio":
             out = self.spec_transf(x.squeeze(1))
@@ -571,11 +569,13 @@ class ConvertibleSpectrogram(nn.Module):
             scale = scale / power_scale
 
             import torchaudio
+
             out = torchaudio.functional.amplitude_to_DB(
                 out,
                 multiplier=scale,
                 amin=min_magnitude,
                 db_multiplier=0,
-                top_db=top_db)
+                top_db=top_db,
+            )
 
         return out
